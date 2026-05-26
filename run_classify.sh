@@ -1,5 +1,5 @@
 #!/bin/bash
-#SBATCH --job-name=classify_eval
+#SBATCH --job-name=finetune_distilbert
 #SBATCH --output=logs/classify_%j.out
 #SBATCH --error=logs/classify_%j.err
 #SBATCH --time=12:00:00
@@ -31,6 +31,6 @@ mkdir -p logs
 nvidia-smi
 
 # Run the script
-python finetune_longformer.py
+python finetune_distilbert.py
 
 echo "End: $(date)"
