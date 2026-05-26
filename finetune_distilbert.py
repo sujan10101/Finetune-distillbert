@@ -9,7 +9,7 @@ from transformers import (
     get_linear_schedule_with_warmup,
 )
 from torch.optim import AdamW
-from sklearn.model_selection import StratifiedKFold
+from sklearn.model_selection import GroupKFold
 from sklearn.metrics import accuracy_score, f1_score, confusion_matrix
 from tqdm import tqdm
 import warnings
@@ -24,7 +24,8 @@ BATCH_SIZE = 16
 EPOCHS = 3
 LEARNING_RATE = 2e-5
 N_SPLITS = 5
-DATASET_PATH = "dataset_balanced.csv"
+DATASET_PATH = "dataset_clean.csv"
+ORIGINAL_DATASET_PATH = "dataset_balanced.csv"  # used only for group IDs in CV
 OUTPUT_DIR = "finetuned_distilbert"
 
 
@@ -90,7 +91,7 @@ def evaluate(model, loader, device):
     return np.array(all_labels), np.array(all_preds)
 
 
-def run_cv(texts, labels):
+def run_cv(texts, labels, groups):
     device = torch.device(
         "mps" if torch.backends.mps.is_available()
         else "cuda" if torch.cuda.is_available()
@@ -99,15 +100,15 @@ def run_cv(texts, labels):
     print(f"Device: {device}")
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
-    skf = StratifiedKFold(n_splits=N_SPLITS, shuffle=True, random_state=42)
-    texts, labels = np.array(texts), np.array(labels)
+    gkf = GroupKFold(n_splits=N_SPLITS)
+    texts, labels, groups = np.array(texts), np.array(labels), np.array(groups)
     fold_accs, fold_f1s, fold_fprs = [], [], []
 
     print(f"\n{'='*60}")
-    print(f"Fine-Tuned {MODEL_NAME} — {N_SPLITS}-Fold CV")
+    print(f"Fine-Tuned {MODEL_NAME} — {N_SPLITS}-Fold GroupKFold CV")
     print(f"{'='*60}")
 
-    for fold, (train_idx, val_idx) in enumerate(skf.split(texts, labels), 1):
+    for fold, (train_idx, val_idx) in enumerate(gkf.split(texts, labels, groups=groups), 1):
         print(f"\nFold {fold}/{N_SPLITS}")
 
         train_loader = DataLoader(
@@ -167,13 +168,16 @@ def run_cv(texts, labels):
     print(f"Results saved to {OUTPUT_DIR}/cv_results.csv")
 
 
-def load_data(path):
+def load_data(path, original_path):
     df = pd.read_csv(path).dropna(subset=["content"])
+    # Load titles from original dataset as group IDs (not used as features)
+    orig = pd.read_csv(original_path, usecols=["title"]).loc[df.index]
+    groups = orig["title"].fillna("unknown").astype(str).tolist()
     print(f"Loaded {len(df)} samples | label dist: {df['is_ai_flagged'].value_counts().to_dict()}")
-    return df["content"].astype(str).tolist(), df["is_ai_flagged"].astype(int).tolist()
+    return df["content"].astype(str).tolist(), df["is_ai_flagged"].astype(int).tolist(), groups
 
 
 if __name__ == "__main__":
     os.makedirs(OUTPUT_DIR, exist_ok=True)
-    texts, labels = load_data(DATASET_PATH)
-    run_cv(texts, labels)
+    texts, labels, groups = load_data(DATASET_PATH, ORIGINAL_DATASET_PATH)
+    run_cv(texts, labels, groups)
