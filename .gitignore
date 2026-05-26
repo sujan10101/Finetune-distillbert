@@ -1,0 +1,8 @@
+# Ignore everything
+*
+
+# Except these files
+!.gitignore
+!finetune_distilbert.py
+!run_classify.sh
+!dataset_balanced.csv
