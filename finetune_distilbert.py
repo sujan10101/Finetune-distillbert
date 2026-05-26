@@ -1,4 +1,5 @@
 import os
+import logging
 import numpy as np
 import pandas as pd
 import torch
@@ -17,6 +18,17 @@ import warnings
 warnings.filterwarnings("ignore")
 np.random.seed(42)
 torch.manual_seed(42)
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+    handlers=[
+        logging.StreamHandler(),
+        logging.FileHandler("finetune_distilbert.log"),
+    ],
+)
+logger = logging.getLogger(__name__)
 
 MODEL_NAME = "distilbert-base-uncased"
 MAX_LENGTH = 512
@@ -74,7 +86,9 @@ def train_one_epoch(model, loader, optimizer, scheduler, device):
         optimizer.step()
         scheduler.step()
         total_loss += outputs.loss.item()
-    return total_loss / len(loader)
+    avg_loss = total_loss / len(loader)
+    logger.debug("Batch training complete — avg loss: %.4f", avg_loss)
+    return avg_loss
 
 
 def evaluate(model, loader, device):
@@ -97,19 +111,18 @@ def run_cv(texts, labels, groups):
         else "cuda" if torch.cuda.is_available()
         else "cpu"
     )
-    print(f"Device: {device}")
+    logger.info("Using device: %s", device)
 
+    logger.info("Loading tokenizer: %s", MODEL_NAME)
     tokenizer = AutoTokenizer.from_pretrained(MODEL_NAME)
     gkf = GroupKFold(n_splits=N_SPLITS)
     texts, labels, groups = np.array(texts), np.array(labels), np.array(groups)
     fold_accs, fold_f1s, fold_fprs = [], [], []
 
-    print(f"\n{'='*60}")
-    print(f"Fine-Tuned {MODEL_NAME} — {N_SPLITS}-Fold GroupKFold CV")
-    print(f"{'='*60}")
+    logger.info("Starting %d-fold GroupKFold CV with %s", N_SPLITS, MODEL_NAME)
 
     for fold, (train_idx, val_idx) in enumerate(gkf.split(texts, labels, groups=groups), 1):
-        print(f"\nFold {fold}/{N_SPLITS}")
+        logger.info("--- Fold %d/%d | train=%d  val=%d ---", fold, N_SPLITS, len(train_idx), len(val_idx))
 
         train_loader = DataLoader(
             WikipediaDataset(texts[train_idx].tolist(), labels[train_idx].tolist(), tokenizer),
@@ -120,6 +133,7 @@ def run_cv(texts, labels, groups):
             batch_size=BATCH_SIZE,
         )
 
+        logger.info("Loading model: %s", MODEL_NAME)
         model = AutoModelForSequenceClassification.from_pretrained(
             MODEL_NAME, num_labels=2
         ).to(device)
@@ -131,53 +145,67 @@ def run_cv(texts, labels, groups):
             num_warmup_steps=int(0.1 * total_steps),
             num_training_steps=total_steps,
         )
+        logger.info("Optimizer: AdamW | lr=%.0e | total_steps=%d | warmup=%d",
+                    LEARNING_RATE, total_steps, int(0.1 * total_steps))
 
         best_f1, best_preds, best_labels_val = 0.0, None, None
         for epoch in range(1, EPOCHS + 1):
+            logger.info("Epoch %d/%d — training...", epoch, EPOCHS)
             loss = train_one_epoch(model, train_loader, optimizer, scheduler, device)
+            logger.info("Epoch %d/%d — evaluating...", epoch, EPOCHS)
             y_true, y_pred = evaluate(model, val_loader, device)
             acc, f1, fpr = compute_metrics(y_true, y_pred)
-            print(f"  Epoch {epoch}/{EPOCHS} — loss: {loss:.4f} | acc: {acc:.4f} | F1: {f1:.4f} | FPR: {fpr:.4f}")
+            logger.info("Epoch %d/%d — loss: %.4f | acc: %.4f | F1: %.4f | FPR: %.4f",
+                        epoch, EPOCHS, loss, acc, f1, fpr)
             if f1 > best_f1:
                 best_f1, best_preds, best_labels_val = f1, y_pred, y_true
+                logger.info("New best F1: %.4f", best_f1)
 
         acc, f1, fpr = compute_metrics(best_labels_val, best_preds)
         fold_accs.append(acc)
         fold_f1s.append(f1)
         fold_fprs.append(fpr)
-        print(f"  Best — Accuracy: {acc:.4f} | F1: {f1:.4f} | FPR: {fpr:.4f}")
+        logger.info("Fold %d best — Accuracy: %.4f | F1: %.4f | FPR: %.4f", fold, acc, f1, fpr)
 
         fold_dir = os.path.join(OUTPUT_DIR, f"fold_{fold}")
         os.makedirs(fold_dir, exist_ok=True)
         model.save_pretrained(fold_dir)
         tokenizer.save_pretrained(fold_dir)
+        logger.info("Model saved to %s", fold_dir)
 
-    print(f"\n{'='*60}")
-    print("FINAL RESULTS")
-    print(f"{'='*60}")
-    print(f"Accuracy : {np.mean(fold_accs):.4f} ± {np.std(fold_accs):.4f}")
-    print(f"F1 Score : {np.mean(fold_f1s):.4f} ± {np.std(fold_f1s):.4f}")
-    print(f"FPR      : {np.mean(fold_fprs):.4f} ± {np.std(fold_fprs):.4f}")
+    logger.info("=" * 60)
+    logger.info("FINAL RESULTS")
+    logger.info("Accuracy : %.4f ± %.4f", np.mean(fold_accs), np.std(fold_accs))
+    logger.info("F1 Score : %.4f ± %.4f", np.mean(fold_f1s), np.std(fold_f1s))
+    logger.info("FPR      : %.4f ± %.4f", np.mean(fold_fprs), np.std(fold_fprs))
+    logger.info("=" * 60)
 
+    results_path = os.path.join(OUTPUT_DIR, "cv_results.csv")
     pd.DataFrame({
         "fold": list(range(1, N_SPLITS + 1)) + ["Mean", "Std"],
         "Accuracy": fold_accs + [np.mean(fold_accs), np.std(fold_accs)],
         "F1_Score": fold_f1s + [np.mean(fold_f1s), np.std(fold_f1s)],
         "FPR": fold_fprs + [np.mean(fold_fprs), np.std(fold_fprs)],
-    }).to_csv(os.path.join(OUTPUT_DIR, "cv_results.csv"), index=False)
-    print(f"Results saved to {OUTPUT_DIR}/cv_results.csv")
+    }).to_csv(results_path, index=False)
+    logger.info("Results saved to %s", results_path)
 
 
 def load_data(path, original_path):
+    logger.info("Loading dataset from %s", path)
     df = pd.read_csv(path).dropna(subset=["content"])
-    # Load titles from original dataset as group IDs (not used as features)
+    logger.info("Loading group IDs from %s", original_path)
     orig = pd.read_csv(original_path, usecols=["title"]).loc[df.index]
     groups = orig["title"].fillna("unknown").astype(str).tolist()
-    print(f"Loaded {len(df)} samples | label dist: {df['is_ai_flagged'].value_counts().to_dict()}")
+    logger.info("Loaded %d samples | label dist: %s", len(df), df["is_ai_flagged"].value_counts().to_dict())
     return df["content"].astype(str).tolist(), df["is_ai_flagged"].astype(int).tolist(), groups
 
 
 if __name__ == "__main__":
+    logger.info("=" * 60)
+    logger.info("finetune_distilbert.py started")
+    logger.info("Config — model: %s | max_len: %d | batch: %d | epochs: %d | lr: %.0e | folds: %d",
+                MODEL_NAME, MAX_LENGTH, BATCH_SIZE, EPOCHS, LEARNING_RATE, N_SPLITS)
     os.makedirs(OUTPUT_DIR, exist_ok=True)
     texts, labels, groups = load_data(DATASET_PATH, ORIGINAL_DATASET_PATH)
     run_cv(texts, labels, groups)
+    logger.info("finetune_distilbert.py finished")
