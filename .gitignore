@@ -3,6 +3,7 @@
 
 # Except these files
 !.gitignore
+!.gitattributes
 !finetune_distilbert.py
 !run_classify.sh
-!dataset_balanced.csv
+dataset_balanced.csv
