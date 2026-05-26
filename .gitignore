@@ -7,4 +7,4 @@
 !finetune_distilbert.py
 !run_classify.sh
 dataset_balanced.csv
-dataset_clean.csv
+!dataset_clean.csv
